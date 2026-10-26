@@ -27,3 +27,6 @@ mlruns/
 # OS
 .DS_Store
 Thumbs.db
+
+# Session notes
+SESSION.md
