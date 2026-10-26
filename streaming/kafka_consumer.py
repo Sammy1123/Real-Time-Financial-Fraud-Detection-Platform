@@ -17,9 +17,13 @@ load_dotenv()
 BROKER        = os.getenv("KAFKA_BROKER", "localhost:9092")
 IN_TOPIC      = os.getenv("KAFKA_TOPIC_TRANSACTIONS", "transactions")
 OUT_TOPIC     = os.getenv("KAFKA_TOPIC_ALERTS", "fraud-alerts")
+DLQ_TOPIC     = os.getenv("KAFKA_TOPIC_DLQ", "fraud-dlq")
 GROUP_ID      = os.getenv("KAFKA_GROUP_ID", "fraud-consumer-group")
 API_URL       = os.getenv("SCORING_API_URL", "http://localhost:8000/score")
 ALERTS_FILE   = Path("streaming/fraud_alerts.jsonl")
+
+MAX_RETRIES   = 3
+RETRY_BASE_S  = 1.0   # doubles each attempt: 1s, 2s, 4s
 
 ALERTS_FILE.parent.mkdir(exist_ok=True)
 
@@ -44,17 +48,19 @@ def make_producer() -> KafkaProducer:
 
 
 def score_transaction(tx: dict) -> dict | None:
-    """POST transaction to scoring API. Returns response dict or None on error."""
-    try:
-        resp = requests.post(API_URL, json=tx, timeout=2)
-        resp.raise_for_status()
-        return resp.json()
-    except requests.exceptions.ConnectionError:
-        print("  WARNING: Scoring API not reachable. Is it running?")
-        return None
-    except Exception as e:
-        print(f"  WARNING: Scoring error — {e}")
-        return None
+    """POST to scoring API with exponential backoff. Returns response or None after MAX_RETRIES."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.post(API_URL, json=tx, timeout=2)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.ConnectionError:
+            print(f"  WARNING: Scoring API not reachable (attempt {attempt}/{MAX_RETRIES})")
+        except Exception as e:
+            print(f"  WARNING: Scoring error (attempt {attempt}/{MAX_RETRIES}) — {e}")
+        if attempt < MAX_RETRIES:
+            time.sleep(RETRY_BASE_S * (2 ** (attempt - 1)))
+    return None
 
 
 def main():
@@ -70,7 +76,7 @@ def main():
     print(f"Listening on '{IN_TOPIC}' → scoring → publishing alerts to '{OUT_TOPIC}'")
     print(f"Fraud alerts logged to: {ALERTS_FILE}\n")
 
-    processed = flagged = errors = 0
+    processed = flagged = errors = dead_lettered = 0
     start = time.time()
 
     try:
@@ -80,6 +86,9 @@ def main():
 
             if result is None:
                 errors += 1
+                dead_lettered += 1
+                producer.send(DLQ_TOPIC, value={"tx": tx, "reason": "scoring_failed", "timestamp": time.time()})
+                print(f"  DLQ: transaction {tx.get('TransactionID')} sent to '{DLQ_TOPIC}' after {MAX_RETRIES} retries")
                 continue
 
             processed += 1
@@ -106,10 +115,10 @@ def main():
                 elapsed = time.time() - start
                 rate    = processed / elapsed
                 print(f"  [{processed:,} processed | {flagged} flagged "
-                      f"| {rate:.1f} tx/s | errors: {errors}]")
+                      f"| {rate:.1f} tx/s | errors: {errors} | dlq: {dead_lettered}]")
 
     except KeyboardInterrupt:
-        print(f"\nStopped. Processed: {processed:,}  Flagged: {flagged}  Errors: {errors}")
+        print(f"\nStopped. Processed: {processed:,}  Flagged: {flagged}  Errors: {errors}  DLQ: {dead_lettered}")
     finally:
         producer.flush()
         producer.close()
