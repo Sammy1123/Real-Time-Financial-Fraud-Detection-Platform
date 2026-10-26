@@ -52,7 +52,7 @@ def load_alerts() -> pd.DataFrame:
 st.sidebar.title("🛡️ Fraud Detection")
 page = st.sidebar.radio(
     "Navigate",
-    ["Overview", "Transactions", "Model Performance", "Live Alerts"],
+    ["Overview", "Transactions", "Model Performance", "Live Alerts", "Drift Monitor"],
 )
 st.sidebar.markdown("---")
 st.sidebar.caption("IEEE-CIS Fraud Detection Platform")
@@ -316,3 +316,102 @@ elif page == "Live Alerts":
     if auto_refresh:
         time.sleep(5)
         st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PAGE 5 — Drift Monitor
+# ══════════════════════════════════════════════════════════════════════════
+elif page == "Drift Monitor":
+    st.title("📡 Drift Monitor")
+
+    DRIFT_FILE = Path("monitoring/drift_report.json")
+
+    if not DRIFT_FILE.exists():
+        st.warning("No drift report found. Run the monitor first.")
+        st.code("python main.py monitor")
+        st.stop()
+
+    report = json.load(open(DRIFT_FILE))
+
+    data_alert  = report["alerts"]["data_drift_alert"]
+    model_alert = report["alerts"]["model_drift_alert"]
+
+    # ── KPI row ────────────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Data Drift Alert",  "YES" if data_alert  else "NO",
+              delta=None, delta_color="inverse" if data_alert else "normal")
+    k2.metric("Model Drift Alert", "YES" if model_alert else "NO")
+    k3.metric("Features Drifted (PSI)",
+              report["data_drift"]["features_drifted"])
+    k4.metric("Features Failing KS",
+              report["ks_test"]["features_failing"])
+
+    if data_alert:
+        st.error("Data drift detected — feature distributions have shifted significantly.")
+    else:
+        st.success("No significant data drift detected.")
+
+    st.caption(f"Report generated: {report['run_timestamp']}  |  "
+               f"Reference: {report['reference_size']:,} rows  |  "
+               f"Current: {report['current_size']:,} rows")
+
+    st.markdown("---")
+
+    # ── PSI chart ──────────────────────────────────────────────────────────
+    st.subheader("PSI by Feature (top 20)")
+    psi_data = report["data_drift"]["all_psi"]
+    psi_df   = (pd.DataFrame(list(psi_data.items()), columns=["feature", "psi"])
+                  .sort_values("psi", ascending=False)
+                  .head(20))
+
+    def psi_color(v):
+        if v >= 0.2:  return "crimson"
+        if v >= 0.1:  return "orange"
+        return "steelblue"
+
+    psi_df["color"] = psi_df["psi"].apply(psi_color)
+    psi_df["status"] = psi_df["psi"].apply(
+        lambda v: "Alert (>0.2)" if v >= 0.2 else ("Warn (>0.1)" if v >= 0.1 else "OK"))
+
+    fig = px.bar(psi_df.sort_values("psi"), x="psi", y="feature",
+                 orientation="h", color="status",
+                 color_discrete_map={"Alert (>0.2)": "crimson",
+                                     "Warn (>0.1)": "orange",
+                                     "OK": "steelblue"},
+                 title="Population Stability Index (PSI) — Top 20 Features",
+                 labels={"psi": "PSI", "feature": ""})
+    fig.add_vline(x=0.1, line_dash="dash", line_color="orange",
+                  annotation_text="Warn 0.1")
+    fig.add_vline(x=0.2, line_dash="dash", line_color="crimson",
+                  annotation_text="Alert 0.2")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── KS chart ───────────────────────────────────────────────────────────
+    st.subheader("KS Statistic by Feature (top 20)")
+    ks_data = report["ks_test"]["results"]
+    ks_df   = (pd.DataFrame(
+                   [{"feature": k, "ks_stat": v["statistic"], "p_value": v["p_value"]}
+                    for k, v in ks_data.items()])
+                 .sort_values("ks_stat", ascending=False)
+                 .head(20))
+
+    ks_df["significant"] = ks_df["p_value"].apply(
+        lambda p: "Significant (p<0.05)" if p < 0.05 else "Not Significant")
+
+    fig = px.bar(ks_df.sort_values("ks_stat"), x="ks_stat", y="feature",
+                 orientation="h", color="significant",
+                 color_discrete_map={"Significant (p<0.05)": "crimson",
+                                     "Not Significant": "steelblue"},
+                 title="KS Test Statistic — Top 20 Features",
+                 labels={"ks_stat": "KS Statistic", "feature": ""})
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Model score drift ──────────────────────────────────────────────────
+    st.subheader("Model Score Drift")
+    md = report["model_drift"]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Score PSI",         f"{md['score_psi']:.4f}")
+    m2.metric("Score KS Statistic",f"{md['score_ks_statistic']:.4f}")
+    m3.metric("Ref Fraud Rate",    f"{md['ref_fraud_rate']:.4%}")
+    m4.metric("Cur Fraud Rate",    f"{md['cur_fraud_rate']:.4%}",
+              delta=f"{md['fraud_rate_delta']:+.4%}")
