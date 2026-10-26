@@ -1,0 +1,29 @@
+# Data
+data/raw/
+data/processed/
+
+# Models
+models/*.pkl
+models/*.pt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Env
+.env
+
+# MLflow
+mlruns/
+
+# Streamlit
+.streamlit/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

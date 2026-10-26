@@ -1,0 +1,26 @@
+
+IEEE-CIS Fraud Detection — EDA Summary
+=======================================
+Total transactions : 590,540
+Fraud cases        : 20,663 (3.4990%)
+Total features     : 436
+
+Missing data
+  >30% missing     : 232 features
+  >90% missing     : 12 features
+
+TransactionAmt
+  Mean (legit)     : $134.51
+  Mean (fraud)     : $149.24
+  Median (legit)   : $68.50
+  Median (fraud)   : $75.00
+
+Top ProductCD fraud rates:
+ProductCD
+C    0.116873
+S    0.058996
+H    0.047662
+R    0.037826
+W    0.020399
+
+Outputs saved to: D:\fraud-detection-platform\data\eda_outputs
