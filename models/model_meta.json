@@ -7,6 +7,14 @@
     "card1_amt_mean",
     "card1_amt_std",
     "amt_vs_card1_mean",
+    "card1_tx_count_1h",
+    "card1_tx_amount_1h",
+    "card1_tx_count_24h",
+    "card1_tx_amount_24h",
+    "card1_addr1_freq",
+    "ProductCD_target",
+    "card4_target",
+    "card6_target",
     "card1_freq",
     "card2_freq",
     "addr1_freq",
@@ -55,7 +63,7 @@
     "V243",
     "V154"
   ],
-  "threshold": 0.8299999999999996,
-  "roc_auc": 0.9397141874098804,
-  "pr_auc": 0.6306171830673527
+  "threshold": 0.7199999999999996,
+  "roc_auc": 0.9514715974607622,
+  "pr_auc": 0.7360647529306479
 }
