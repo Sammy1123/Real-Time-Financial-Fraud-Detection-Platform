@@ -1,10 +1,12 @@
 """
 Real-time fraud scoring API.
-POST /score        → fraud probability + decision (single transaction)
-POST /score/batch  → batch scoring up to 500 transactions
-GET  /health       → liveness check
+POST /score        -> fraud probability + decision (single transaction)
+POST /score/batch  -> batch scoring up to 500 transactions
+GET  /health       -> liveness check
 """
+import hashlib
 import json
+import os
 import joblib
 import numpy as np
 from pathlib import Path
@@ -12,9 +14,20 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
+from dotenv import load_dotenv
 
-MODELS = Path("models")
-FS     = Path("features/feature_store_data")
+load_dotenv()
+
+try:
+    import redis
+    _REDIS_AVAILABLE = True
+except ImportError:
+    _REDIS_AVAILABLE = False
+
+MODELS         = Path("models")
+FS             = Path("features/feature_store_data")
+REDIS_URL      = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CACHE_TTL      = int(os.getenv("REDIS_CACHE_TTL", "60"))
 
 # ── Load at module level (fast — no CSV reading) ───────────────────────────
 meta      = json.load(open(MODELS / "model_meta.json"))
@@ -24,15 +37,37 @@ THRESHOLD = meta["threshold"]
 
 _FREQ_MAPS: dict = {}
 _CAT_MAPS:  dict = {}
+_redis_client     = None
+
+
+def _get_redis():
+    """Return Redis client if available, else None."""
+    if not _REDIS_AVAILABLE or _redis_client is None:
+        return None
+    return _redis_client
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _redis_client
     print("Loading lookup maps...")
     _FREQ_MAPS.update(joblib.load(FS / "freq_maps.pkl"))
     _CAT_MAPS.update(joblib.load(FS  / "cat_maps.pkl"))
+    if _REDIS_AVAILABLE:
+        try:
+            _redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+            _redis_client.ping()
+            print(f"Redis cache connected ({REDIS_URL}) — TTL {CACHE_TTL}s")
+        except Exception:
+            _redis_client = None
+            print("Redis not reachable — caching disabled, scoring will proceed without cache")
+    else:
+        print("redis-py not installed — caching disabled")
     print(f"API ready — {len(FEATURES)} features, threshold {THRESHOLD:.2f}")
     yield
+    if _redis_client:
+        _redis_client.close()
+        print("Redis connection closed")
 
 
 app = FastAPI(title="Fraud Detection API", version="1.0", lifespan=lifespan)
@@ -98,6 +133,7 @@ class ScoreResponse(BaseModel):
     is_fraud:          bool
     threshold_used:    float
     risk_level:        str
+    cache_hit:         bool = False
 
 
 class BatchRequest(BaseModel):
@@ -145,29 +181,68 @@ def engineer(t: Transaction) -> np.ndarray:
     return np.array([[row.get(f, -999) for f in FEATURES]], dtype=np.float32)
 
 
-def _to_risk(prob: float) -> str:
+def _cache_key(vec: np.ndarray) -> str:
+    return "fraud:score:" + hashlib.md5(vec.tobytes()).hexdigest()
+
+
+def _cache_get(key: str) -> Optional[dict]:
+    rc = _get_redis()
+    if rc is None:
+        return None
+    try:
+        val = rc.get(key)
+        return json.loads(val) if val else None
+    except Exception:
+        return None
+
+
+def _cache_set(key: str, value: dict) -> None:
+    rc = _get_redis()
+    if rc is None:
+        return
+    try:
+        rc.setex(key, CACHE_TTL, json.dumps(value))
+    except Exception:
+        pass
+
+
+
     return "HIGH" if prob >= 0.8 else "MEDIUM" if prob >= 0.4 else "LOW"
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": "xgboost", "features": len(FEATURES)}
+    rc   = _get_redis()
+    cache_status = "connected" if rc else "disabled"
+    return {"status": "ok", "model": "xgboost", "features": len(FEATURES), "cache": cache_status}
 
 
 @app.post("/score", response_model=ScoreResponse)
 def score(transaction: Transaction):
     try:
-        prob = float(model.predict_proba(engineer(transaction))[0, 1])
+        vec = engineer(transaction)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return ScoreResponse(
+    key    = _cache_key(vec)
+    cached = _cache_get(key)
+    if cached:
+        return ScoreResponse(**cached, cache_hit=True)
+
+    try:
+        prob = float(model.predict_proba(vec)[0, 1])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    result = dict(
         fraud_probability=round(prob, 4),
         is_fraud=prob >= THRESHOLD,
         threshold_used=THRESHOLD,
         risk_level=_to_risk(prob),
     )
+    _cache_set(key, result)
+    return ScoreResponse(**result, cache_hit=False)
 
 
 @app.post("/score/batch", response_model=BatchScoreResponse)
