@@ -1,7 +1,8 @@
 """
 Real-time fraud scoring API.
-POST /score  → fraud probability + decision
-GET  /health → liveness check
+POST /score        → fraud probability + decision (single transaction)
+POST /score/batch  → batch scoring up to 500 transactions
+GET  /health       → liveness check
 """
 import json
 import joblib
@@ -10,7 +11,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 MODELS = Path("models")
 FS     = Path("features/feature_store_data")
@@ -99,6 +100,20 @@ class ScoreResponse(BaseModel):
     risk_level:        str
 
 
+class BatchRequest(BaseModel):
+    transactions: List[Transaction]
+
+    class Config:
+        json_schema_extra = {"example": {"transactions": []}}
+
+
+class BatchScoreResponse(BaseModel):
+    results:      List[ScoreResponse]
+    total:        int
+    fraud_count:  int
+    avg_prob:     float
+
+
 # ── Feature engineering ────────────────────────────────────────────────────
 def engineer(t: Transaction) -> np.ndarray:
     row = {}
@@ -130,6 +145,10 @@ def engineer(t: Transaction) -> np.ndarray:
     return np.array([[row.get(f, -999) for f in FEATURES]], dtype=np.float32)
 
 
+def _to_risk(prob: float) -> str:
+    return "HIGH" if prob >= 0.8 else "MEDIUM" if prob >= 0.4 else "LOW"
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
@@ -143,10 +162,40 @@ def score(transaction: Transaction):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    risk = "HIGH" if prob >= 0.8 else "MEDIUM" if prob >= 0.4 else "LOW"
     return ScoreResponse(
         fraud_probability=round(prob, 4),
         is_fraud=prob >= THRESHOLD,
         threshold_used=THRESHOLD,
-        risk_level=risk,
+        risk_level=_to_risk(prob),
+    )
+
+
+@app.post("/score/batch", response_model=BatchScoreResponse)
+def score_batch(batch: BatchRequest):
+    if not batch.transactions:
+        raise HTTPException(status_code=422, detail="transactions list is empty")
+    if len(batch.transactions) > 500:
+        raise HTTPException(status_code=422, detail="batch size exceeds limit of 500")
+
+    try:
+        X     = np.vstack([engineer(t) for t in batch.transactions])
+        probs = model.predict_proba(X)[:, 1]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    results = [
+        ScoreResponse(
+            fraud_probability=round(float(p), 4),
+            is_fraud=float(p) >= THRESHOLD,
+            threshold_used=THRESHOLD,
+            risk_level=_to_risk(float(p)),
+        )
+        for p in probs
+    ]
+    fraud_count = sum(r.is_fraud for r in results)
+    return BatchScoreResponse(
+        results=results,
+        total=len(results),
+        fraud_count=fraud_count,
+        avg_prob=round(float(probs.mean()), 4),
     )
