@@ -28,6 +28,7 @@ COMMANDS = {
     "dashboard": ["python", "-m", "streamlit", "run", "dashboard/app.py"],
     "monitor":   ["python", "monitoring/drift_detection.py"],
     "tune":      ["python", "models/tune_xgboost_optuna.py"],
+    "test":      ["python", "-m", "pytest", "tests/", "-v"],
 }
 
 
