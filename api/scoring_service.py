@@ -6,12 +6,15 @@ GET  /health       -> liveness check
 """
 import hashlib
 import json
+import logging
 import os
+import time
 import joblib
 import numpy as np
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 from dotenv import load_dotenv
@@ -24,16 +27,34 @@ try:
 except ImportError:
     _REDIS_AVAILABLE = False
 
+# ── Logging setup ──────────────────────────────────────────────────────────
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(exist_ok=True)
+
+_fmt     = logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",
+                              datefmt="%Y-%m-%d %H:%M:%S")
+_fh      = RotatingFileHandler(LOGS_DIR / "api.log", maxBytes=5_000_000, backupCount=3)
+_fh.setFormatter(_fmt)
+_ch      = logging.StreamHandler()
+_ch.setFormatter(_fmt)
+
+logger = logging.getLogger("fraud_api")
+logger.setLevel(logging.INFO)
+logger.addHandler(_fh)
+logger.addHandler(_ch)
+
 MODELS         = Path("models")
 FS             = Path("features/feature_store_data")
 REDIS_URL      = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CACHE_TTL      = int(os.getenv("REDIS_CACHE_TTL", "60"))
 
 # ── Load at module level (fast — no CSV reading) ───────────────────────────
+logger.info("Loading model and metadata...")
 meta      = json.load(open(MODELS / "model_meta.json"))
 model     = joblib.load(MODELS / "xgboost_model.pkl")
 FEATURES  = meta["features"]
 THRESHOLD = meta["threshold"]
+logger.info(f"Model loaded — {len(FEATURES)} features, threshold {THRESHOLD:.2f}")
 
 _FREQ_MAPS: dict = {}
 _CAT_MAPS:  dict = {}
@@ -50,24 +71,25 @@ def _get_redis():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _redis_client
-    print("Loading lookup maps...")
+    logger.info("Loading lookup maps...")
     _FREQ_MAPS.update(joblib.load(FS / "freq_maps.pkl"))
     _CAT_MAPS.update(joblib.load(FS  / "cat_maps.pkl"))
+    logger.info("Lookup maps loaded")
     if _REDIS_AVAILABLE:
         try:
             _redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
             _redis_client.ping()
-            print(f"Redis cache connected ({REDIS_URL}) — TTL {CACHE_TTL}s")
-        except Exception:
+            logger.info(f"Redis cache connected ({REDIS_URL}) — TTL {CACHE_TTL}s")
+        except Exception as e:
             _redis_client = None
-            print("Redis not reachable — caching disabled, scoring will proceed without cache")
+            logger.warning(f"Redis not reachable ({e}) — caching disabled")
     else:
-        print("redis-py not installed — caching disabled")
-    print(f"API ready — {len(FEATURES)} features, threshold {THRESHOLD:.2f}")
+        logger.warning("redis-py not installed — caching disabled")
+    logger.info(f"API ready — {len(FEATURES)} features, threshold {THRESHOLD:.2f}")
     yield
     if _redis_client:
         _redis_client.close()
-        print("Redis connection closed")
+        logger.info("Redis connection closed")
 
 
 app = FastAPI(title="Fraud Detection API", version="1.0", lifespan=lifespan)
@@ -192,7 +214,8 @@ def _cache_get(key: str) -> Optional[dict]:
     try:
         val = rc.get(key)
         return json.loads(val) if val else None
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Redis GET failed: {e}")
         return None
 
 
@@ -202,37 +225,44 @@ def _cache_set(key: str, value: dict) -> None:
         return
     try:
         rc.setex(key, CACHE_TTL, json.dumps(value))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Redis SET failed: {e}")
 
 
-
+def _to_risk(prob: float) -> str:
     return "HIGH" if prob >= 0.8 else "MEDIUM" if prob >= 0.4 else "LOW"
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    rc   = _get_redis()
+    rc           = _get_redis()
     cache_status = "connected" if rc else "disabled"
+    logger.info(f"Health check — cache: {cache_status}")
     return {"status": "ok", "model": "xgboost", "features": len(FEATURES), "cache": cache_status}
 
 
 @app.post("/score", response_model=ScoreResponse)
 def score(transaction: Transaction):
+    t0 = time.perf_counter()
     try:
         vec = engineer(transaction)
     except Exception as e:
+        logger.exception(f"Feature engineering failed for TransactionID={transaction.TransactionDT}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     key    = _cache_key(vec)
     cached = _cache_get(key)
     if cached:
+        ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"SCORE | id={transaction.TransactionDT} | prob={cached['fraud_probability']} "
+                    f"| risk={cached['risk_level']} | cache=HIT | {ms:.1f}ms")
         return ScoreResponse(**cached, cache_hit=True)
 
     try:
         prob = float(model.predict_proba(vec)[0, 1])
     except Exception as e:
+        logger.exception(f"Model inference failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     result = dict(
@@ -242,6 +272,9 @@ def score(transaction: Transaction):
         risk_level=_to_risk(prob),
     )
     _cache_set(key, result)
+    ms = (time.perf_counter() - t0) * 1000
+    logger.info(f"SCORE | id={transaction.TransactionDT} | prob={result['fraud_probability']} "
+                f"| risk={result['risk_level']} | fraud={result['is_fraud']} | cache=MISS | {ms:.1f}ms")
     return ScoreResponse(**result, cache_hit=False)
 
 
@@ -252,10 +285,12 @@ def score_batch(batch: BatchRequest):
     if len(batch.transactions) > 500:
         raise HTTPException(status_code=422, detail="batch size exceeds limit of 500")
 
+    t0 = time.perf_counter()
     try:
         X     = np.vstack([engineer(t) for t in batch.transactions])
         probs = model.predict_proba(X)[:, 1]
     except Exception as e:
+        logger.exception(f"Batch scoring failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
     results = [
@@ -268,6 +303,8 @@ def score_batch(batch: BatchRequest):
         for p in probs
     ]
     fraud_count = sum(r.is_fraud for r in results)
+    ms = (time.perf_counter() - t0) * 1000
+    logger.info(f"BATCH | n={len(results)} | fraud={fraud_count} | avg_prob={probs.mean():.4f} | {ms:.1f}ms")
     return BatchScoreResponse(
         results=results,
         total=len(results),
