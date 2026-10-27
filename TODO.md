@@ -14,13 +14,6 @@
 
 ## 🌐 API
 
-### Batch Scoring Endpoint (Priority: MEDIUM)
-- Consumer currently scores one-by-one — add POST /score/batch for higher throughput
-
-### Caching (Priority: MEDIUM)
-- Add Redis caching for repeated card1/addr1 lookups
-- Cache model predictions for identical feature vectors (TTL: 60s)
-
 ### Lifespan Shutdown Hook (Priority: LOW)
 - Add cleanup after `yield` in lifespan: close Redis connections, flush any buffers
 
@@ -46,4 +39,3 @@
 ## 📋 General
 
 - Pin all dependencies to exact versions matching Python 3.10 env in requirements.txt
-- Add integration tests in tests/ that hit the /score endpoint with known fraud/legit samples
