@@ -3,19 +3,9 @@
 ## 🔧 Model Tuning
 
 ### GNN Improvements (Priority: MEDIUM)
-- ROC-AUC 0.68 / PR-AUC 0.51 — weaker than XGBoost standalone (0.95 / 0.74)
-- GNN's real value is as an ensemble signal — combine XGBoost prob + GNN prob as input to a meta-learner
-- Graph currently only uses card1 edges — add addr1 and P_emaildomain edges for richer fraud ring detection
-- Train on full dataset with NeighborLoader (mini-batch) instead of full-graph on subsample
-- Replace GraphSAGE with GAT (Graph Attention Network) — learns which neighbours matter more
-- Loss is high (9–22) — scale node features with StandardScaler before training
-
----
-
-## 🌐 API
-
-### Lifespan Shutdown Hook (Priority: LOW)
-- Add cleanup after `yield` in lifespan: close Redis connections, flush any buffers
+- Current GAT: ROC-AUC 0.71 / PR-AUC 0.47 (up from 0.68 / 0.51 baseline)
+- Train on full dataset with NeighborLoader (mini-batch) instead of 67k subsample
+- GNN covers only ~3% of validation rows — ensemble PR-AUC gain (+0.8pp) is on covered rows only; expand coverage before trusting the ensemble
 
 ---
 
@@ -33,9 +23,3 @@
 - M1/M3/M7/M8/M9 features show significant PSI drift (>0.2) — investigate root cause
 - Add scheduled runs (cron / Airflow) to run drift_detection.py daily
 - Add alerting: send email/Slack webhook when data_drift_alert or model_drift_alert is True
-
----
-
-## 📋 General
-
-- Pin all dependencies to exact versions matching Python 3.10 env in requirements.txt
