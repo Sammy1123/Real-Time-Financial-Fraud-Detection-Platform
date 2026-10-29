@@ -1,28 +1,17 @@
-# Fraud Detection Platform — TODO / Pending Improvements
+# Fraud Detection Platform — Roadmap
 
-## 🔧 Model Tuning
+All items from the previous TODO are complete. Remaining suggestions below,
+ordered by impact.
 
-### GNN Improvements
-- ✅ DONE: Full-dataset training (590k nodes, 12.7M edges)
-- ✅ DONE: 2-hop neighbour sampling (bounded k=10/5 per level)
-- ✅ DONE: Nightly graph cache (api/build_graph_cache.py) feeds live GNN signal to scoring API
-- Remaining: upgrade scheduler.py one-shot runs to Windows Task Scheduler / cron in production
-- Remaining: graph cache currently scores training-graph nodes; extend to cover streaming test transactions
+## 🚀 Hosting & Deployment
+- [ ] Streamlit Cloud / Hugging Face Spaces deployment for dashboard (free, git-backed)
+- [ ] Containerize API + dashboard (Dockerfile + docker-compose with Kafka/Redis)
+- [ ] CI pipeline (GitHub Actions): lint + pytest + API smoke test on push
 
----
+## 🔧 Model
+- [ ] Retrain GNN with the new 2-hop sampling and rebuild ensemble meta-learner
+- [ ] Extend graph cache to streaming test transactions (currently training-graph only)
 
-## 📡 Streaming
-
-### Producer
-- ✅ DONE: Schema validation before publish (validate_message; rejects to DLQ)
-- ✅ DONE: Load-test mode (`--delay-ms 0`, `--limit N`) with live throughput reporting
-
----
-
-## 📈 Monitoring
-
-### Drift Detection
-- ✅ DONE: PSI drift on M1/M3/M7/M8/M9 diagnosed — identity-table coverage skew (41% → ~19% over time), excluded from alerting with rationale
-- ✅ DONE: scheduler.py — daily pipeline (graph cache → drift → alerts)
-- ✅ DONE: alerting.py — Slack webhook + email (SMTP) on drift alerts
-- Remaining: populate ALERT_SLACK_WEBHOOK / ALERT_EMAIL_* in .env for real delivery
+## 📈 Ops
+- [ ] Wire scheduler.py into Windows Task Scheduler / cron for real daily runs
+- [ ] Populate ALERT_SLACK_WEBHOOK / ALERT_EMAIL_* in .env for alert delivery

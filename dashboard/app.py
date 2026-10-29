@@ -1,9 +1,7 @@
 """
 Fraud Detection Platform — Streamlit Dashboard
 Pages: Overview | Transactions | Model Performance | Live Alerts | Drift Monitor
-
-Hosted via Streamlit Community Cloud (git-backed) or locally:
-    python main.py dashboard
+Run: python main.py dashboard
 """
 import json
 import time
@@ -25,7 +23,7 @@ st.set_page_config(
     layout="wide",
 )
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(".")
 PROC        = ROOT / "data" / "processed"
 MODELS      = ROOT / "models"
 ALERTS_FILE = ROOT / "streaming" / "fraud_alerts.jsonl"
@@ -34,15 +32,7 @@ DRIFT_FILE  = ROOT / "monitoring" / "drift_report.json"
 # ── Cached loaders ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_train():
-    """Downsample for cloud-friendly memory footprint; full data locally."""
-    df = pd.read_parquet(PROC / "train.parquet")
-    if len(df) > 150_000:
-        # keep every fraud row, subsample legit rows
-        fraud = df[df.isFraud == 1]
-        legit = df[df.isFraud == 0].sample(
-            n=min(140_000, (df.isFraud == 0).sum()), random_state=42)
-        df = pd.concat([fraud, legit]).sample(frac=1, random_state=42)
-    return df
+    return pd.read_parquet(PROC / "train.parquet")
 
 @st.cache_data(show_spinner=False)
 def load_meta():
@@ -171,26 +161,25 @@ elif page == "Transactions":
     display_cols = ["TransactionID", "TransactionAmt", "log_amt", "hour", "day", "isFraud"]
     display_cols = [c for c in display_cols if c in filtered.columns]
     st.dataframe(
-        filtered[display_cols].head(500),
+        filtered[display_cols].head(500).style.applymap(
+            lambda v: "background-color: #ffcccc" if v == 1 else "",
+            subset=["isFraud"]
+        ),
         use_container_width=True,
         height=400,
     )
 
     # Amount distribution for filtered set
-    if len(filtered) > 0:
-        sample_n = min(5000, len(filtered))
-        sample = filtered.sample(sample_n, random_state=42)
-        fig = px.histogram(
-            sample, x="TransactionAmt", nbins=50,
-            color=sample["isFraud"].map({0:"Legit",1:"Fraud"}),
-            barmode="overlay", opacity=0.7,
-            title="Transaction Amount Distribution (filtered)",
-            color_discrete_map={"Legit": "steelblue", "Fraud": "crimson"},
-            labels={"color": ""},
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No transactions match the filters.")
+    fig = px.histogram(
+        filtered.sample(min(5000, len(filtered)), random_state=42),
+        x="TransactionAmt", nbins=50,
+        color=filtered.sample(min(5000, len(filtered)), random_state=42)["isFraud"].map({0:"Legit",1:"Fraud"}),
+        barmode="overlay", opacity=0.7,
+        title="Transaction Amount Distribution (filtered)",
+        color_discrete_map={"Legit": "steelblue", "Fraud": "crimson"},
+        labels={"color": ""},
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # ══════════════
@@ -361,11 +350,6 @@ elif page == "Drift Monitor":
         st.error("Data drift detected — feature distributions have shifted significantly.")
     else:
         st.success("No significant data drift detected.")
-
-    excluded = report["data_drift"].get("excluded_identity_only", [])
-    if excluded:
-        st.caption(f"ℹ️ Identity-only columns excluded from alerting "
-                   f"(coverage skew, not real drift): {', '.join(excluded)}")
 
     st.caption(f"Report generated: {report['run_timestamp']}  |  "
                f"Reference: {report['reference_size']:,} rows  |  "
