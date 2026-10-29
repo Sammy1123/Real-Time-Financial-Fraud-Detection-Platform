@@ -18,8 +18,8 @@ __pycache__/
 # MLflow
 mlruns/
 
-# Streamlit
-.streamlit/
+# Streamlit (secrets are ignored, theme config is tracked)
+.streamlit/secrets.toml
 
 # Jupyter
 .ipynb_checkpoints/
