@@ -1,7 +1,9 @@
 """
 Fraud Detection Platform — Streamlit Dashboard
-Pages: Overview | Transactions | Model Performance | Live Alerts
-Run: python main.py dashboard
+Pages: Overview | Transactions | Model Performance | Live Alerts | Drift Monitor
+
+Hosted via Streamlit Community Cloud (git-backed) or locally:
+    python main.py dashboard
 """
 import json
 import time
@@ -23,14 +25,24 @@ st.set_page_config(
     layout="wide",
 )
 
-PROC        = Path("data/processed")
-MODELS      = Path("models")
-ALERTS_FILE = Path("streaming/fraud_alerts.jsonl")
+ROOT = Path(__file__).resolve().parent.parent
+PROC        = ROOT / "data" / "processed"
+MODELS      = ROOT / "models"
+ALERTS_FILE = ROOT / "streaming" / "fraud_alerts.jsonl"
+DRIFT_FILE  = ROOT / "monitoring" / "drift_report.json"
 
 # ── Cached loaders ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_train():
-    return pd.read_parquet(PROC / "train.parquet")
+    """Downsample for cloud-friendly memory footprint; full data locally."""
+    df = pd.read_parquet(PROC / "train.parquet")
+    if len(df) > 150_000:
+        # keep every fraud row, subsample legit rows
+        fraud = df[df.isFraud == 1]
+        legit = df[df.isFraud == 0].sample(
+            n=min(140_000, (df.isFraud == 0).sum()), random_state=42)
+        df = pd.concat([fraud, legit]).sample(frac=1, random_state=42)
+    return df
 
 @st.cache_data(show_spinner=False)
 def load_meta():
@@ -57,9 +69,9 @@ page = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.caption("IEEE-CIS Fraud Detection Platform")
 
-# ══════════════════════════════════════════════════════════════════════════
+# ════════════════════════
 # PAGE 1 — Overview
-# ══════════════════════════════════════════════════════════════════════════
+# ════════════════════════
 if page == "Overview":
     st.title("📊 Overview")
 
@@ -126,9 +138,9 @@ if page == "Overview":
         st.plotly_chart(fig, use_container_width=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════
 # PAGE 2 — Transactions
-# ══════════════════════════════════════════════════════════════════════════
+# ════════════════════════
 elif page == "Transactions":
     st.title("💳 Transactions")
 
@@ -159,30 +171,31 @@ elif page == "Transactions":
     display_cols = ["TransactionID", "TransactionAmt", "log_amt", "hour", "day", "isFraud"]
     display_cols = [c for c in display_cols if c in filtered.columns]
     st.dataframe(
-        filtered[display_cols].head(500).style.applymap(
-            lambda v: "background-color: #ffcccc" if v == 1 else "",
-            subset=["isFraud"]
-        ),
+        filtered[display_cols].head(500),
         use_container_width=True,
         height=400,
     )
 
     # Amount distribution for filtered set
-    fig = px.histogram(
-        filtered.sample(min(5000, len(filtered)), random_state=42),
-        x="TransactionAmt", nbins=50,
-        color=filtered.sample(min(5000, len(filtered)), random_state=42)["isFraud"].map({0:"Legit",1:"Fraud"}),
-        barmode="overlay", opacity=0.7,
-        title="Transaction Amount Distribution (filtered)",
-        color_discrete_map={"Legit": "steelblue", "Fraud": "crimson"},
-        labels={"color": ""},
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    if len(filtered) > 0:
+        sample_n = min(5000, len(filtered))
+        sample = filtered.sample(sample_n, random_state=42)
+        fig = px.histogram(
+            sample, x="TransactionAmt", nbins=50,
+            color=sample["isFraud"].map({0:"Legit",1:"Fraud"}),
+            barmode="overlay", opacity=0.7,
+            title="Transaction Amount Distribution (filtered)",
+            color_discrete_map={"Legit": "steelblue", "Fraud": "crimson"},
+            labels={"color": ""},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No transactions match the filters.")
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════
 # PAGE 3 — Model Performance
-# ══════════════════════════════════════════════════════════════════════════
+# ════════════════════════
 elif page == "Model Performance":
     st.title("🤖 Model Performance")
 
@@ -258,9 +271,9 @@ elif page == "Model Performance":
     st.plotly_chart(fig, use_container_width=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════
 # PAGE 4 — Live Alerts
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════
 elif page == "Live Alerts":
     st.title("🚨 Live Fraud Alerts")
 
@@ -318,13 +331,11 @@ elif page == "Live Alerts":
         st.rerun()
 
 
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════
 # PAGE 5 — Drift Monitor
-# ══════════════════════════════════════════════════════════════════════════
+# ══════════════
 elif page == "Drift Monitor":
     st.title("📡 Drift Monitor")
-
-    DRIFT_FILE = Path("monitoring/drift_report.json")
 
     if not DRIFT_FILE.exists():
         st.warning("No drift report found. Run the monitor first.")
@@ -351,6 +362,11 @@ elif page == "Drift Monitor":
     else:
         st.success("No significant data drift detected.")
 
+    excluded = report["data_drift"].get("excluded_identity_only", [])
+    if excluded:
+        st.caption(f"ℹ️ Identity-only columns excluded from alerting "
+                   f"(coverage skew, not real drift): {', '.join(excluded)}")
+
     st.caption(f"Report generated: {report['run_timestamp']}  |  "
                f"Reference: {report['reference_size']:,} rows  |  "
                f"Current: {report['current_size']:,} rows")
@@ -364,12 +380,6 @@ elif page == "Drift Monitor":
                   .sort_values("psi", ascending=False)
                   .head(20))
 
-    def psi_color(v):
-        if v >= 0.2:  return "crimson"
-        if v >= 0.1:  return "orange"
-        return "steelblue"
-
-    psi_df["color"] = psi_df["psi"].apply(psi_color)
     psi_df["status"] = psi_df["psi"].apply(
         lambda v: "Alert (>0.2)" if v >= 0.2 else ("Warn (>0.1)" if v >= 0.1 else "OK"))
 
