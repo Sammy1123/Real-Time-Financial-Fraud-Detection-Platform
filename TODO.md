@@ -3,17 +3,18 @@
 ## 🔧 Model Tuning
 
 ### GNN Improvements (Priority: MEDIUM)
-- Current GAT: ROC-AUC 0.71 / PR-AUC 0.47 (up from 0.68 / 0.51 baseline)
-- Train on full dataset with NeighborLoader (mini-batch) instead of 67k subsample
-- GNN covers only ~3% of validation rows — ensemble PR-AUC gain (+0.8pp) is on covered rows only; expand coverage before trusting the ensemble
+- ✅ DONE: Full-dataset training (590k nodes, 12.7M edges) — ROC-AUC 0.68→~0.79, PR-AUC improving across epochs
+- ✅ DONE: Ensemble updated for full-graph inference (100% validation coverage, was 3%)
+- Remaining: multi-hop neighbors (currently 1-hop, k=10) — torch-sparse unavailable (no C++ build tools)
+- Remaining: real-time graph serving (API uses prior-day graph / base-rate fallback)
 
 ---
 
 ## 📡 Streaming
 
 ### Producer (Priority: LOW)
+- ✅ DONE: Schema validation before publish (validate_message; rejects to DLQ)
 - PRODUCER_DELAY_MS=100 simulates ~10 tx/s — tune down to 0 for load testing
-- Add schema validation (Avro/Protobuf) before publishing to topic
 
 ---
 

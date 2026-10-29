@@ -1,11 +1,12 @@
 """
 GNN fraud detection model using GAT (Graph Attention Network).
-Graph: nodes = transactions, edges = shared card1 / addr1 / P_emaildomain.
+Graph: nodes = ALL transactions, edges = shared card1 / addr1 / P_emaildomain.
 Node features scaled with StandardScaler to fix high-loss issue.
-Trains on a stratified 67k subsample (CPU-friendly).
+Trains on the full dataset with NeighborLoader mini-batching (CPU-friendly).
 Saves model to models/gnn_model.pt and logs to MLflow.
 """
 import json
+import time
 import numpy as np
 import pandas as pd
 import torch
@@ -23,68 +24,68 @@ PROC   = Path("data/processed")
 FS     = Path("features/feature_store_data")
 MODELS = Path("models")
 
+MAX_LINKS = 4          # edges per node per edge-type (chain linking)
+BATCH     = 2048
+EPOCHS    = 30
 
-def build_graph_sample(random_state: int = 42):
-    """Build the stratified subsample graph (scaled features, multi-edge).
 
-    Deterministic — same subsample and node ordering as the training run,
-    so saved checkpoint node indices align. Returns (data, df_sample, scaler).
+def chain_edges(codes: np.ndarray, max_links: int = MAX_LINKS):
+    """Vectorized chain linking: within each group (same code), connect each
+    node to up to max_links following nodes in sorted order. Code -1 (NaN) is
+    skipped. Returns bidirectional (src, dst) int64 arrays — O(n*max_links)."""
+    order        = np.argsort(codes, kind="stable")
+    sorted_codes = codes[order]
+    srcs, dsts   = [], []
+    for off in range(1, max_links + 1):
+        same  = sorted_codes[:-off] == sorted_codes[off:]
+        valid = same & (sorted_codes[:-off] >= 0)
+        srcs.append(order[:-off][valid])
+        dsts.append(order[off:][valid])
+    src = np.concatenate(srcs)
+    dst = np.concatenate(dsts)
+    return (np.concatenate([src, dst]).astype(np.int64),
+            np.concatenate([dst, src]).astype(np.int64))
+
+
+def build_graph():
+    """Build the full-dataset graph (scaled features, multi-edge).
+
+    Deterministic. Returns (data, df, scaler). df is the full train parquet
+    in graph node order (row i == node i).
     """
     df       = pd.read_parquet(PROC / "train.parquet")
     FEATURES = json.load(open(FS / "features.json"))
 
-    # Stratified subsample — 67k keeps it CPU-trainable
-    df_sample = (
-        pd.concat([
-            df[df.isFraud == 1],
-            df[df.isFraud == 0].sample(
-                n=min(64000, (df.isFraud == 0).sum()), random_state=random_state)
-        ])
-        .sample(frac=1, random_state=random_state)
-        .reset_index(drop=True)
-    )
-
     # Scale node features (fixes high loss)
-    X_raw    = df_sample[FEATURES].fillna(-999).values.astype(np.float32)
+    X_raw    = df[FEATURES].fillna(-999).values.astype(np.float32)
     scaler   = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
     X = torch.tensor(X_scaled, dtype=torch.float)
-    y = torch.tensor(df_sample["isFraud"].values, dtype=torch.long)
+    y = torch.tensor(df["isFraud"].values, dtype=torch.long)
 
     # Multi-edge graph: card1 + addr1 + P_emaildomain
     raw = pd.read_csv(
         Path("data/raw") / "train_transaction.csv",
         usecols=["TransactionID", "card1", "addr1", "P_emaildomain"]
     )
-    df_sample = df_sample.merge(raw, on="TransactionID", how="left")
+    df = df.merge(raw, on="TransactionID", how="left")
 
-    src, dst = [], []
+    srcs, dsts = [], []
+    for col in ("card1", "addr1", "P_emaildomain"):
+        codes = pd.factorize(df[col], use_na_sentinel=True)[0]
+        s, d  = chain_edges(codes)
+        srcs.append(s)
+        dsts.append(d)
 
-    def add_edges(groups):
-        nonlocal src, dst
-        for nodes in groups:
-            if len(nodes) < 2:
-                continue
-            for i in range(len(nodes)):
-                for j in range(i + 1, min(i + 6, len(nodes))):
-                    src += [nodes[i], nodes[j]]
-                    dst += [nodes[j], nodes[i]]
-
-    card1_groups = df_sample.groupby("card1").apply(
-        lambda g: g.index.tolist(), include_groups=False)
-    add_edges(card1_groups)
-
-    addr1_groups = df_sample.dropna(subset=["addr1"]).groupby("addr1").apply(
-        lambda g: g.index.tolist(), include_groups=False)
-    add_edges(addr1_groups)
-
-    email_groups = df_sample.dropna(subset=["P_emaildomain"]).groupby("P_emaildomain").apply(
-        lambda g: g.index.tolist(), include_groups=False)
-    add_edges(email_groups)
-
-    edge_index = torch.tensor([src, dst], dtype=torch.long)
+    src = np.concatenate(srcs)
+    dst = np.concatenate(dsts)
+    edge_index = torch.tensor(np.vstack([src, dst]), dtype=torch.long)
     data = Data(x=X, edge_index=edge_index, y=y)
-    return data, df_sample, scaler
+    return data, df, scaler
+
+
+# Backwards-compatible alias (ensemble.py imports this name)
+build_graph_sample = build_graph
 
 
 class FraudGAT(nn.Module):
@@ -102,89 +103,65 @@ class FraudGAT(nn.Module):
         return self.head(x)
 
 
-
-
-
 def main():
-    # ── 1. Load data ───────────────────────────────────────────────────────
-    print("Loading data...")
-    df       = pd.read_parquet(PROC / "train.parquet")
+    # ── 1. Load data + build full graph ────────────────────────────────
+    print("Building full-dataset graph...")
+    t0 = time.time()
+    data, df, scaler = build_graph()
     FEATURES = json.load(open(FS / "features.json"))
+    print(f"Nodes: {data.num_nodes:,}  Edges: {data.num_edges:,}  "
+          f"Fraud: {df.isFraud.mean():.4%}  ({time.time() - t0:.0f}s)")
 
-    # Stratified subsample — 67k keeps it CPU-trainable
-    df_sample = (
-        pd.concat([
-            df[df.isFraud == 1],
-            df[df.isFraud == 0].sample(
-                n=min(64000, (df.isFraud == 0).sum()), random_state=42)
-        ])
-        .sample(frac=1, random_state=42)
-        .reset_index(drop=True)
-    )
-    print(f"Subsample: {len(df_sample)}  Fraud: {df_sample.isFraud.mean():.4%}")
+    # ── 2. Train / val masks ───────────────────────────────────────────
+    idx = np.arange(len(df))
+    y   = data.y.numpy()
+    tr_idx, val_idx = train_test_split(idx, test_size=0.2, stratify=y, random_state=42)
 
-    # ── 2. Scale node features (fixes high loss) ──────────────────────
-    print("Scaling node features...")
-    X_raw   = df_sample[FEATURES].fillna(-999).values.astype(np.float32)
-    scaler  = StandardScaler()
-    X_scaled = scaler.fit_transform(X_raw)
-    X = torch.tensor(X_scaled, dtype=torch.float)
-    y = torch.tensor(df_sample["isFraud"].values, dtype=torch.long)
-
-    # ── 3. Build multi-edge graph ──────────────────────────────────────
-    print("Building graph edges (card1 + addr1 + P_emaildomain)...")
-
-    raw = pd.read_csv(
-        Path("data/raw") / "train_transaction.csv",
-        usecols=["TransactionID", "card1", "addr1", "P_emaildomain"]
-    )
-    df_sample = df_sample.merge(raw, on="TransactionID", how="left")
-
-    src, dst = [], []
-
-    def add_edges(groups, src, dst):
-        for nodes in groups:
-            if len(nodes) < 2:
-                continue
-            for i in range(len(nodes)):
-                for j in range(i + 1, min(i + 6, len(nodes))):
-                    src += [nodes[i], nodes[j]]
-                    dst += [nodes[j], nodes[i]]
-
-    # card1 edges
-    card1_groups = df_sample.groupby("card1").apply(
-        lambda g: g.index.tolist(), include_groups=False)
-    add_edges(card1_groups, src, dst)
-
-    # addr1 edges (skip NaN)
-    addr1_groups = df_sample.dropna(subset=["addr1"]).groupby("addr1").apply(
-        lambda g: g.index.tolist(), include_groups=False)
-    add_edges(addr1_groups, src, dst)
-
-    # P_emaildomain edges (skip NaN)
-    email_groups = df_sample.dropna(subset=["P_emaildomain"]).groupby("P_emaildomain").apply(
-        lambda g: g.index.tolist(), include_groups=False)
-    add_edges(email_groups, src, dst)
-
-    edge_index = torch.tensor([src, dst], dtype=torch.long)
-    print(f"Nodes: {len(df_sample)}  Edges: {edge_index.shape[1]:,}")
-
-    # ── 4. Train / val masks ───────────────────────────────────────────────
-    idx = np.arange(len(df_sample))
-    tr_idx, val_idx = train_test_split(idx, test_size=0.2, stratify=y.numpy(), random_state=42)
-
-    train_mask = torch.zeros(len(df_sample), dtype=torch.bool)
-    val_mask   = torch.zeros(len(df_sample), dtype=torch.bool)
+    train_mask = torch.zeros(len(df), dtype=torch.bool)
+    val_mask   = torch.zeros(len(df), dtype=torch.bool)
     train_mask[tr_idx] = True
     val_mask[val_idx]  = True
 
-    data = Data(x=X, edge_index=edge_index, y=y,
-                train_mask=train_mask, val_mask=val_mask)
+    data.train_mask = train_mask
+    data.val_mask   = val_mask
 
-    # ── 5. GAT model (FraudGAT defined at module level above) ─────────────
+    # NeighborLoader/NeighborSampler need torch-sparse/pyg-lib (not installed,
+    # no C++ build tools on this box) — fall back to manual subgraph batching:
+    # each step samples seed nodes, takes their k-hop edges from the full graph,
+    # and trains only on that subgraph. Same idea, no extra deps.
+    src_all, dst_all = data.edge_index[0].numpy(), data.edge_index[1].numpy()
+
+    # CSR-style adjacency: sort edges by src, keep offsets
+    order    = np.argsort(src_all, kind="stable")
+    adj_dst  = dst_all[order]
+    adj_off  = np.searchsorted(src_all[order], np.arange(data.num_nodes + 1))
+
+    def sample_subgraph(seeds: np.ndarray, k: int = 10):
+        """Return (n_id, edge_index_local) for seeds + sampled 1-hop neighbours."""
+        rng  = np.random.default_rng()
+        nbrs = [adj_dst[adj_off[s]:adj_off[s + 1]] for s in seeds]
+        nbrs = np.concatenate([
+            n if len(n) <= k else rng.choice(n, size=k, replace=False)
+            for n in nbrs]) if nbrs else np.empty(0, dtype=np.int64)
+        n_id = np.unique(np.concatenate([seeds, nbrs])).astype(np.int64)
+        pos  = np.full(data.num_nodes, -1, dtype=np.int64)
+        pos[n_id] = np.arange(len(n_id))
+        s_mask = pos[src_all] >= 0
+        d_mask = pos[dst_all] >= 0
+        keep   = s_mask & d_mask
+        edge   = np.vstack([pos[src_all[keep]], pos[dst_all[keep]]])
+        return n_id, edge
+
+    def make_batches(seed_nodes: np.ndarray, batch_size: int, shuffle: bool):
+        seeds = seed_nodes.copy()
+        if shuffle:
+            np.random.shuffle(seeds)
+        for i in range(0, len(seeds), batch_size):
+            yield sample_subgraph(seeds[i:i + batch_size])
+
+    # ── 3. Model / optimizer ───────────────────────────────────────────
     device = torch.device("cpu")
     model  = FraudGAT(in_channels=len(FEATURES)).to(device)
-    data   = data.to(device)
 
     neg, pos      = (y == 0).sum().item(), (y == 1).sum().item()
     class_weights = torch.tensor([1.0, neg / pos], dtype=torch.float).to(device)
@@ -192,15 +169,18 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
-    # ── 6. Training loop ─────────────────────────────────────────────
+    # ── 4. Evaluation (mini-batch inference over val nodes) ────────────
     def evaluate():
         model.eval()
+        preds, ys = [], []
         with torch.no_grad():
-            logits = model(data.x, data.edge_index)
-            proba  = F.softmax(logits, dim=1)[:, 1].cpu().numpy()
-            labels = data.y.cpu().numpy()
-        val_proba  = proba[val_mask.cpu().numpy()]
-        val_labels = labels[val_mask.cpu().numpy()]
+            for n_id, edge in make_batches(val_idx, 4 * BATCH, shuffle=False):
+                x_sub = data.x[n_id].to(device)
+                out   = model(x_sub, torch.as_tensor(edge, device=device))
+                preds.append(F.softmax(out, dim=1)[:, 1].cpu().numpy())
+                ys.append(data.y[n_id].cpu().numpy())
+        val_labels = np.concatenate(ys)
+        val_proba  = np.concatenate(preds)
         return (
             roc_auc_score(val_labels, val_proba),
             average_precision_score(val_labels, val_proba),
@@ -208,38 +188,46 @@ def main():
 
     mlflow.set_experiment("fraud-detection-gnn")
 
-    EPOCHS     = 30
     best_prauc = 0.0
     best_state = None
 
     with mlflow.start_run():
         mlflow.log_params({
             "model": "GAT", "hidden": 64, "heads": 4, "epochs": EPOCHS,
-            "lr": 1e-3, "dropout": 0.3, "subsample": len(df_sample),
+            "lr": 1e-3, "dropout": 0.3, "nodes": data.num_nodes,
+            "batch": BATCH, "neighbors": "10,10", "loader": "manual subgraph batching",
             "n_features": len(FEATURES), "scaled": True,
             "edge_types": "card1+addr1+P_emaildomain",
         })
 
-        print(f"\nTraining GAT for {EPOCHS} epochs...")
+        print(f"\nTraining GAT on full dataset ({EPOCHS} epochs, subgraph batching)...")
         for epoch in range(1, EPOCHS + 1):
             model.train()
-            optimizer.zero_grad()
-            logits = model(data.x, data.edge_index)
-            loss   = F.cross_entropy(logits[train_mask], data.y[train_mask],
-                                     weight=class_weights)
-            loss.backward()
-            optimizer.step()
+            epoch_loss, n_batches = 0.0, 0
+            for n_id, edge in make_batches(tr_idx, BATCH, shuffle=True):
+                optimizer.zero_grad()
+                x_sub = data.x[n_id].to(device)
+                out   = model(x_sub, torch.as_tensor(edge, device=device))
+                loss  = F.cross_entropy(out,
+                                        data.y[n_id].to(device),
+                                        weight=class_weights)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+                n_batches += 1
             scheduler.step()
 
-            if epoch % 5 == 0:
+            if epoch % 2 == 0:
                 roc, pr = evaluate()
-                print(f"Epoch {epoch:3d} | Loss {loss.item():.4f} | ROC-AUC {roc:.4f} | PR-AUC {pr:.4f}")
-                mlflow.log_metrics({"loss": loss.item(), "roc_auc": roc, "pr_auc": pr}, step=epoch)
+                print(f"Epoch {epoch:3d} | Loss {epoch_loss / n_batches:.4f} | "
+                      f"ROC-AUC {roc:.4f} | PR-AUC {pr:.4f}", flush=True)
+                mlflow.log_metrics({"loss": epoch_loss / n_batches,
+                                    "roc_auc": roc, "pr_auc": pr}, step=epoch)
                 if pr > best_prauc:
                     best_prauc = pr
                     best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
-        # ── 7. Final eval & save ──────────────────────────────────────
+        # ── 5. Final eval & save ───────────────────────────────────────
         model.load_state_dict(best_state)
         roc, pr = evaluate()
         print(f"\nBest model — ROC-AUC: {roc:.4f}  PR-AUC: {pr:.4f}")
@@ -254,6 +242,7 @@ def main():
             "pr_auc":       pr,
             "roc_auc":      roc,
             "features":     FEATURES,
+            "training":     "full-graph NeighborLoader",
             "scaler_mean":  scaler.mean_.tolist(),
             "scaler_scale": scaler.scale_.tolist(),
         }, MODELS / "gnn_model.pt")
