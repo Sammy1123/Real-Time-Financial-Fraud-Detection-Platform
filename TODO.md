@@ -24,11 +24,9 @@ No open items.
 
 ## 🎓 Presentability (internship review recommendations)
 
-High-impact items an interviewer is likely to probe:
-
-1. **Unit tests for feature engineering & monitoring** — the API has integration tests, but the PSI computation, chain-linking edge builder, and preprocessing have no direct tests. A pytest file per module (~10 tests each) would let you say "the pipeline logic is tested", not just the HTTP layer.
-2. **Commit the small artifacts the dashboard needs** — `models/model_meta.json` and a downsampled `train_sample.parquet` (~150k rows, a few MB) would let anyone clone the repo and run the dashboard without downloading 590k rows from Kaggle.
-3. **requirements.txt dev/prod split** — separate out pytest, httpx etc. into requirements-dev.txt so production installs stay minimal.
-4. **Type hints + docstring pass on streaming modules** — `kafka_producer.py` and `kafka_consumer.py` are the least documented files; a 15-minute pass brings them up to the same standard as `api/`.
-5. **One architecture diagram image** (even a screenshot of the mermaid diagram in README.md rendered via mermaid.live) — pinned at the top of the README it reads better in a GitHub preview than ASCII art.
-6. **Record a 60-second dashboard walkthrough** (OBS/PowerPoint screen record) — a GIF or mp4 linked from the README shows the product working without making anyone run it.
+1. ~~Unit tests for feature engineering & monitoring~~ ✅ DONE — tests/test_pipeline_logic.py, 29 tests covering chain_edges, PSI, schema validation, preprocessing
+2. ~~Commit the small artifacts~~ ✅ DONE — train_sample.parquet + model_meta.json committed, dashboard falls back to the sample
+3. ~~requirements.txt dev/prod split~~ ✅ DONE — requirements-dev.txt for pytest/httpx/playwright
+4. ~~Type hints + docstrings on streaming modules~~ ✅ DONE — both Kafka modules fully annotated
+5. ~~Architecture diagram image~~ ✅ DONE — mermaid flowchart (GitHub renders natively)
+6. ~~Dashboard walkthrough~~ — SKIPPED per decision; capture_demo.py remains available as an optional tool

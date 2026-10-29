@@ -14,21 +14,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BROKER        = os.getenv("KAFKA_BROKER", "localhost:9092")
-IN_TOPIC      = os.getenv("KAFKA_TOPIC_TRANSACTIONS", "transactions")
-OUT_TOPIC     = os.getenv("KAFKA_TOPIC_ALERTS", "fraud-alerts")
-DLQ_TOPIC     = os.getenv("KAFKA_TOPIC_DLQ", "fraud-dlq")
-GROUP_ID      = os.getenv("KAFKA_GROUP_ID", "fraud-consumer-group")
-API_URL       = os.getenv("SCORING_API_URL", "http://localhost:8000/score")
-ALERTS_FILE   = Path("streaming/fraud_alerts.jsonl")
+BROKER: str        = os.getenv("KAFKA_BROKER", "localhost:9092")
+IN_TOPIC: str      = os.getenv("KAFKA_TOPIC_TRANSACTIONS", "transactions")
+OUT_TOPIC: str     = os.getenv("KAFKA_TOPIC_ALERTS", "fraud-alerts")
+DLQ_TOPIC: str     = os.getenv("KAFKA_TOPIC_DLQ", "fraud-dlq")
+GROUP_ID: str      = os.getenv("KAFKA_GROUP_ID", "fraud-consumer-group")
+API_URL: str       = os.getenv("SCORING_API_URL", "http://localhost:8000/score")
+ALERTS_FILE: Path  = Path("streaming/fraud_alerts.jsonl")
 
-MAX_RETRIES   = 3
-RETRY_BASE_S  = 1.0   # doubles each attempt: 1s, 2s, 4s
+MAX_RETRIES: int   = 3
+RETRY_BASE_S: float = 1.0   # doubles each attempt: 1s, 2s, 4s
 
 ALERTS_FILE.parent.mkdir(exist_ok=True)
 
 
 def make_consumer() -> KafkaConsumer:
+    """Subscribe to IN_TOPIC at the earliest committed offset."""
     return KafkaConsumer(
         IN_TOPIC,
         bootstrap_servers=BROKER,
@@ -40,6 +41,7 @@ def make_consumer() -> KafkaConsumer:
 
 
 def make_producer() -> KafkaProducer:
+    """Create a JSON producer for alerts and dead-letter messages."""
     return KafkaProducer(
         bootstrap_servers=BROKER,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
@@ -48,7 +50,12 @@ def make_producer() -> KafkaProducer:
 
 
 def score_transaction(tx: dict) -> dict | None:
-    """POST to scoring API with exponential backoff. Returns response or None after MAX_RETRIES."""
+    """POST to the scoring API with exponential backoff.
+
+    Retries up to MAX_RETRIES on connection errors and non-2xx responses,
+    doubling the wait between attempts. Returns the parsed response dict,
+    or None if every attempt fails (caller should dead-letter).
+    """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.post(API_URL, json=tx, timeout=2)
@@ -63,7 +70,14 @@ def score_transaction(tx: dict) -> dict | None:
     return None
 
 
-def main():
+def main() -> None:
+    """Consume transactions, score them, publish alerts.
+
+    Flow per message: score via API → on success publish an alert to
+    OUT_TOPIC when is_fraud and append it to ALERTS_FILE; on failure after
+    retries dead-letter the transaction to DLQ_TOPIC. Progress prints every
+    200 messages with throughput and error counters.
+    """
     print(f"Connecting to Kafka broker at {BROKER}...")
     try:
         consumer = make_consumer()

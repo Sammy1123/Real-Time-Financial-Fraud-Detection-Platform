@@ -23,7 +23,7 @@ DELAY_MS   = int(os.getenv("PRODUCER_DELAY_MS", 100)) / 1000
 PROC       = Path("data/processed")
 
 # Raw test data for the original feature columns the API expects
-RAW_COLS = [
+RAW_COLS: list[str] = [
     "TransactionID", "TransactionDT", "TransactionAmt",
     "card1", "card2", "card4", "card6",
     "addr1", "P_emaildomain", "R_emaildomain", "ProductCD",
@@ -37,6 +37,7 @@ RAW_COLS = [
 
 
 def make_producer() -> KafkaProducer:
+    """Create an idempotent, ack-verified JSON producer bound to BROKER."""
     return KafkaProducer(
         bootstrap_servers=BROKER,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
@@ -46,6 +47,11 @@ def make_producer() -> KafkaProducer:
 
 
 def load_transactions() -> pd.DataFrame:
+    """Load test transactions, keeping only the RAW_COLS the API expects.
+
+    NaNs become None so json.dumps emits null rather than NaN literals
+    (which are invalid JSON).
+    """
     raw_tx   = pd.read_csv(Path("data/raw") / "test_transaction.csv")
     raw_id   = pd.read_csv(Path("data/raw") / "test_identity.csv")
     df       = raw_tx.merge(raw_id, on="TransactionID", how="left")
@@ -54,7 +60,7 @@ def load_transactions() -> pd.DataFrame:
 
 
 def serialize(row: dict) -> dict:
-    """Convert numpy types to Python natives for JSON serialization."""
+    """Convert numpy scalar types to Python natives for JSON serialization."""
     return {
         k: (None if v is None or (isinstance(v, float) and np.isnan(v))
             else int(v) if isinstance(v, (np.integer,))
@@ -64,17 +70,17 @@ def serialize(row: dict) -> dict:
     }
 
 
-# ── Schema validation ──────────────────────────────────────────────────────
-REQUIRED_FIELDS = {
+# ── Schema validation ──────────────────────────────────────────────────
+REQUIRED_FIELDS: dict[str, tuple] = {
     "TransactionID":   int,
     "TransactionDT":   int,
     "TransactionAmt":  (int, float),
 }
 
-NUMERIC_FIELDS = {"TransactionAmt", "card1", "card2", "addr1", "dist1", "dist2"}
+NUMERIC_FIELDS: set[str] = {"TransactionAmt", "card1", "card2", "addr1", "dist1", "dist2"}
 
 
-def validate_message(msg: dict) -> tuple[bool, str]:
+def validate_message(msg: object) -> tuple[bool, str]:
     """Validate a serialized transaction against the schema.
 
     Returns (ok, reason). A valid message must have required fields with the
@@ -104,7 +110,12 @@ def validate_message(msg: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def main(max_msgs: int | None = None):
+def main(max_msgs: int | None = None) -> None:
+    """Publish test transactions to TOPIC until interrupted.
+
+    Messages failing schema validation route to DLQ_TOPIC with the failure
+    reason. Pass max_msgs to cap the run (useful for CI smoke tests).
+    """
     print(f"Connecting to Kafka broker at {BROKER}...")
     try:
         producer = make_producer()
