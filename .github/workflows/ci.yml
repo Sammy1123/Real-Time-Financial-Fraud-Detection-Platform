@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile-check all modules
+        run: python -m compileall -q api models streaming monitoring dashboard features scheduler.py
+
+      - name: Validate producer schema logic
+        run: |
+          python - <<'EOF'
+          import sys; sys.path.insert(0, '.')
+          from streaming.kafka_producer import validate_message
+          ok, _ = validate_message({"TransactionID": 1, "TransactionDT": 100, "TransactionAmt": 50.0})
+          assert ok
+          bad, why = validate_message({"TransactionDT": 100})
+          assert not bad and "TransactionID" in why
+          bad, why = validate_message({"TransactionID": 1, "TransactionDT": 100, "TransactionAmt": -5})
+          assert not bad
+          print("schema validation OK")
+          EOF
+
+      - name: Smoke-test drift report structure
+        run: |
+          python - <<'EOF'
+          import json, os
+          if os.path.exists("monitoring/drift_report.json"):
+              r = json.load(open("monitoring/drift_report.json"))
+              assert "alerts" in r and "model_drift" in r and "data_drift" in r
+              assert "excluded_identity_only" in r["data_drift"]
+              print("drift report structure OK")
+          else:
+              print("no drift report — skipping (artifact not committed)")
+          EOF
