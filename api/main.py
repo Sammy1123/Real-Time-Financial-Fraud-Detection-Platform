@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from models.inference import preprocess_transaction, FEATURES
+from api.inference import preprocess_transaction, gnn_signal, _graph_cache
 
 # ── Model registry ─────────────────────────────────────────────────────────
 MODELS = Path("models")
@@ -77,14 +77,12 @@ def _risk(p: float) -> str:
 
 
 def score(tx: dict) -> dict:
-    """Run the full preprocessing → XGBoost → meta-learner pipeline."""
+    """Run the full preprocessing → XGBoost + GNN → meta-learner pipeline."""
     X = preprocess_transaction(tx)             # (n_features,) aligned to FEATURES
     p_xgb = float(xgb_model.predict_proba(X.reshape(1, -1))[0, 1])
 
-    # GNN signal at serving time — conservative fallback to base rate
-    # (real-time graph is built nightly; serving uses prior-day graph)
-    base_rate = 0.0346
-    gnn_p = base_rate
+    # GNN neighbourhood signal from the nightly graph cache
+    gnn_p = gnn_signal(tx)
     p_ens = float(meta_clf.predict_proba([[p_xgb, gnn_p]])[0, 1])
 
     pred = int(p_ens >= threshold)
@@ -104,6 +102,7 @@ def health():
         "models_loaded": True,
         "threshold": threshold,
         "ensemble_weights": ens_meta["weights"],
+        "graph_cache_loaded": bool(_graph_cache),
     }
 
 

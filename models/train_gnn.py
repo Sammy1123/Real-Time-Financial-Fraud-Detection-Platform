@@ -136,14 +136,25 @@ def main():
     adj_dst  = dst_all[order]
     adj_off  = np.searchsorted(src_all[order], np.arange(data.num_nodes + 1))
 
-    def sample_subgraph(seeds: np.ndarray, k: int = 10):
-        """Return (n_id, edge_index_local) for seeds + sampled 1-hop neighbours."""
+    def sample_subgraph(seeds: np.ndarray, k: int = 10, k2: int = 5):
+        """Return (n_id, edge_index_local) for seeds + sampled 2-hop neighbours.
+
+        GATConv has two layers, so each seed needs neighbours at 1-hop and
+        2-hop for the receptive field. Sampling k per 1-hop node and k2 per
+        resulting 2-hop node keeps the subgraph size bounded.
+        """
         rng  = np.random.default_rng()
-        nbrs = [adj_dst[adj_off[s]:adj_off[s + 1]] for s in seeds]
-        nbrs = np.concatenate([
+        # Hop 1: neighbours of the seed nodes
+        nbrs1 = [adj_dst[adj_off[s]:adj_off[s + 1]] for s in seeds]
+        nbrs1 = np.concatenate([
             n if len(n) <= k else rng.choice(n, size=k, replace=False)
-            for n in nbrs]) if nbrs else np.empty(0, dtype=np.int64)
-        n_id = np.unique(np.concatenate([seeds, nbrs])).astype(np.int64)
+            for n in nbrs1]) if nbrs1 else np.empty(0, dtype=np.int64)
+        # Hop 2: neighbours of hop-1 nodes (without re-visiting seeds)
+        nbrs2 = [adj_dst[adj_off[n]:adj_off[n + 1]] for n in nbrs1]
+        nbrs2 = np.concatenate([
+            m if len(m) <= k2 else rng.choice(m, size=k2, replace=False)
+            for m in nbrs2]) if nbrs2 else np.empty(0, dtype=np.int64)
+        n_id = np.unique(np.concatenate([seeds, nbrs1, nbrs2])).astype(np.int64)
         pos  = np.full(data.num_nodes, -1, dtype=np.int64)
         pos[n_id] = np.arange(len(n_id))
         s_mask = pos[src_all] >= 0
@@ -195,7 +206,7 @@ def main():
         mlflow.log_params({
             "model": "GAT", "hidden": 64, "heads": 4, "epochs": EPOCHS,
             "lr": 1e-3, "dropout": 0.3, "nodes": data.num_nodes,
-            "batch": BATCH, "neighbors": "10,10", "loader": "manual subgraph batching",
+            "batch": BATCH, "neighbors": "10,5 (2-hop)", "loader": "manual subgraph batching",
             "n_features": len(FEATURES), "scaled": True,
             "edge_types": "card1+addr1+P_emaildomain",
         })

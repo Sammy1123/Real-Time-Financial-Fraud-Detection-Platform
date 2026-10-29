@@ -8,7 +8,6 @@ the exact feature vector the models were trained on.
 import json
 import joblib
 import numpy as np
-import pandas as pd
 from pathlib import Path
 
 FS = Path("features/feature_store_data")
@@ -16,6 +15,50 @@ FS = Path("features/feature_store_data")
 FEATURES      = json.load(open(FS / "features.json"))
 _freq_maps    = joblib.load(FS / "freq_maps.pkl")
 _cat_maps     = joblib.load(FS / "cat_maps.pkl")
+
+
+def _load_graph_cache() -> dict:
+    """Return the nightly graph cache (or {} if not built yet).
+
+    Provides per-card/addr/email precomputed GNN fraud probabilities plus a
+    global base rate. Refreshed by api/build_graph_cache.py.
+    """
+    cache_path = FS / "graph_cache.pkl"
+    if not cache_path.exists():
+        return {}
+    try:
+        return joblib.load(cache_path)
+    except Exception:
+        return {}
+
+
+_graph_cache = _load_graph_cache()
+
+
+def gnn_signal(tx: dict) -> float:
+    """GNN fraud probability for a live transaction from the graph cache.
+
+    Looks up the transaction's card1 / addr1 / P_emaildomain against the
+    nightly-built cache and averages the hits. Unknown identifiers fall
+    back to the global base rate.
+    """
+    if not _graph_cache:
+        return 0.0346  # global fraud base rate
+
+    hits = []
+    for key, field in (("card_probs", "card1"),
+                       ("addr_probs", "addr1"),
+                       ("mail_probs", "P_emaildomain")):
+        val = tx.get(field)
+        if val is None:
+            continue
+        p = _graph_cache.get(key, {}).get(val)
+        if p is not None:
+            hits.append(p)
+
+    if hits:
+        return float(np.mean(hits))
+    return _graph_cache.get("base_rate", 0.0346)
 
 
 def preprocess_transaction(tx: dict) -> np.ndarray:
