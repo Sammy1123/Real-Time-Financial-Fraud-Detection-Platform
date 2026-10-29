@@ -18,4 +18,4 @@ No open items.
 
 ### Drift Detection (Priority: LOW)
 - Wire scheduler.py into Windows Task Scheduler / cron for real daily runs
-- Populate ALERT_SLACK_WEBHOOK / ALERT_EMAIL_* in .env for real alert delivery
+- Email alerts (alerting.py) are ready but dormant until ALERT_EMAIL_* is set in .env — optional

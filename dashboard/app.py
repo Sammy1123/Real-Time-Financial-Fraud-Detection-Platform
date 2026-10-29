@@ -23,6 +23,11 @@ st.set_page_config(
     layout="wide",
 )
 
+# Keep Plotly charts transparent so they follow Streamlit's light/dark theme
+CHART_BG = "rgba(0,0,0,0)"
+PAPER_BG = "rgba(0,0,0,0)"
+FONT_COL = "var(--text-color)"
+
 ROOT = Path(".")
 PROC        = ROOT / "data" / "processed"
 MODELS      = ROOT / "models"
@@ -125,6 +130,7 @@ if page == "Overview":
                       title="Fraud Rate by Hour of Day",
                       labels={"hour": "Hour", "isFraud": "Fraud Rate"})
         fig.update_traces(line_color="crimson")
+        fig.update_layout(paper_bgcolor=PAPER_BG, plot_bgcolor=CHART_BG)
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -216,7 +222,8 @@ elif page == "Model Performance":
                                  line=dict(color="steelblue", width=2)))
         fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode="lines",
                                  line=dict(dash="dash", color="gray"), name="Random"))
-        fig.update_layout(title="ROC Curve", xaxis_title="FPR", yaxis_title="TPR")
+        fig.update_layout(title="ROC Curve", xaxis_title="FPR", yaxis_title="TPR",
+                          paper_bgcolor=PAPER_BG, plot_bgcolor=CHART_BG)
         st.plotly_chart(fig, use_container_width=True)
 
     # PR curve
@@ -228,7 +235,8 @@ elif page == "Model Performance":
         fig.add_vline(x=0.5, line_dash="dash", line_color="gray",
                       annotation_text="50% Recall")
         fig.update_layout(title="Precision-Recall Curve",
-                          xaxis_title="Recall", yaxis_title="Precision")
+                          xaxis_title="Recall", yaxis_title="Precision",
+                          paper_bgcolor=PAPER_BG, plot_bgcolor=CHART_BG)
         st.plotly_chart(fig, use_container_width=True)
 
     # Threshold tradeoff
@@ -246,7 +254,8 @@ elif page == "Model Performance":
     fig.add_vline(x=meta["threshold"], line_dash="dash", line_color="orange",
                   annotation_text=f"Current ({meta['threshold']:.2f})")
     fig.update_layout(title="F1 / Precision / Recall vs Threshold",
-                      xaxis_title="Threshold", yaxis_title="Score")
+                      xaxis_title="Threshold", yaxis_title="Score",
+                      paper_bgcolor=PAPER_BG, plot_bgcolor=CHART_BG)
     st.plotly_chart(fig, use_container_width=True)
 
     # Feature importance

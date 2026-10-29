@@ -1,18 +1,17 @@
 """
-Drift alerting — notifies on drift-report alerts.
+Drift alerting — email notifications on drift-report alerts.
 
 Reads monitoring/drift_report.json and, when data_drift_alert or
-model_drift_alert is True, sends notifications to every channel that is
-configured in .env:
+model_drift_alert is True, sends an email to ALERT_EMAIL_TO.
 
-  ALERT_SLACK_WEBHOOK   Slack incoming-webhook URL
+Email configuration in .env:
   ALERT_EMAIL_TO        comma-separated recipient list
-  ALERT_EMAIL_FROM      sender address          (required for email)
+  ALERT_EMAIL_FROM      sender address
   SMTP_HOST / SMTP_PORT SMTP server              (default localhost:25)
   SMTP_USER / SMTP_PASS optional SMTP auth
 
-Channels that are not configured are skipped with a log line, so the
-script never fails just because email isn't set up.
+If email isn't configured the alert is written to logs/alerting.log only,
+so scheduled runs never fail because of a missing mail server.
 """
 import json
 import logging
@@ -22,13 +21,12 @@ import ssl
 from email.mime.text import MIMEText
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-REPORT  = Path("monitoring") / "drift_report.json"
-LOGS    = Path("logs")
+REPORT = Path("monitoring") / "drift_report.json"
+LOGS   = Path("logs")
 LOGS.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -74,27 +72,12 @@ def _format_message(report: dict) -> tuple[str, str]:
     return subject, "\n".join(lines)
 
 
-def send_slack(subject: str, body: str) -> bool:
-    webhook = os.getenv("ALERT_SLACK_WEBHOOK")
-    if not webhook:
-        log.info("Slack webhook not configured — skipping")
-        return False
-    try:
-        resp = requests.post(webhook, json={"text": f"*{subject}*\n```{body}```"},
-                             timeout=10)
-        resp.raise_for_status()
-        log.info("Slack alert sent")
-        return True
-    except Exception as e:
-        log.error("Slack send failed: %s", e)
-        return False
-
-
 def send_email(subject: str, body: str) -> bool:
     to = os.getenv("ALERT_EMAIL_TO")
     frm = os.getenv("ALERT_EMAIL_FROM")
     if not to or not frm:
-        log.info("Email not configured (ALERT_EMAIL_TO / ALERT_EMAIL_FROM) — skipping")
+        log.warning("Email not configured (ALERT_EMAIL_TO / ALERT_EMAIL_FROM) "
+                    "— alert logged only")
         return False
 
     host = os.getenv("SMTP_HOST", "localhost")
@@ -142,11 +125,9 @@ def main():
     log.info("Drift alerts fired: %s", ", ".join(fired))
     print(body)
 
-    sent = send_slack(subject, body)
-    sent |= send_email(subject, body)
-    if not sent:
-        log.warning("Alerts fired but no channel was configured — "
-                    "set ALERT_SLACK_WEBHOOK or ALERT_EMAIL_TO in .env")
+    if not send_email(subject, body):
+        log.warning("Alert recorded in this log only — configure ALERT_EMAIL_* "
+                    "in .env for delivery")
 
 
 if __name__ == "__main__":
