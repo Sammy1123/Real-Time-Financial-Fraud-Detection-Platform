@@ -1,5 +1,10 @@
 # Real-Time Financial Fraud Detection Platform
 
+https://github.com/Sammy1123/Real-Time-Financial-Fraud-Detection-Platform/assets/demo.gif
+
+*Dashboard walkthrough — replace the URL above with your recorded GIF
+(see `data/capture_demo.py` for an automated page-by-page recorder).*
+
 End-to-end fraud detection system for the IEEE-CIS Fraud Detection dataset:
 feature engineering → XGBoost + Graph Attention Network ensemble → real-time
 scoring API → Kafka streaming pipeline → monitoring dashboard.
@@ -22,46 +27,39 @@ At the operating threshold the production model reaches **98.1% accuracy,
 
 ## Architecture
 
-```
-                    ┌─────────────────┐
- IEEE-CIS CSV ────► │ Feature         │──► train/test parquet
-                    │ Engineering     │──► freq/cat maps (feature store)
-                    └─────────────────┘
-                            │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-        ┌──────────┐  ┌──────────┐  ┌──────────┐
-        │ XGBoost  │  │ GAT      │  │ Threshold│
-        │ (tabular)│  │ (graph)  │  │ Tuning   │
-        └────┬─────┘  └────┬─────┘  └──────────┘
-             └──────┬──────┘
-                    ▼
-             ┌─────────────┐     ┌─────────────────┐
-             │ Ensemble    │◄────│ Graph Cache     │ (nightly, api/)
-             │ Meta-Learner│     │ (GNN signal)    │
-             └──────┬──────┘     └─────────────────┘
-                    ▼
-             ┌─────────────┐
-             │ FastAPI     │  POST /predict  POST /predict/batch  GET /health
-             │ Scoring API │
-             └──────┬──────┘
-                    ▲
-             ┌─────────────┐     ┌──────────┐     ┌──────────┐
-             │ Kafka       │◄────│ Kafka    │────►│ fraud-   │
-             │ Consumer    │     │ Producer │     │ alerts   │
-             └──────┬──────┘     └──────────┘     └────┬─────┘
-                    │                                  │
-                    ▼                                  ▼
-             ┌─────────────────────────────────────────────┐
-             │  Streamlit Dashboard (5 pages)              │
-             │  Overview | Transactions | Model Perf |     │
-             │  Live Alerts | Drift Monitor                │
-             └─────────────────────────────────────────────┘
-                            ▲
-             ┌─────────────┴───────────┐
-             │ Drift Detection +       │  PSI / KS tests, MLflow logging
-             │ Alerting (daily)        │  email on drift alerts
-             └─────────────────────────┘
+```mermaid
+flowchart TB
+    CSV["IEEE-CIS CSV<br/>(Kaggle)"] --> FE["Feature<br/>Engineering"]
+    FE -->|"train/test parquet"| FEOUT[("Parquet files")]
+    FE -->|"freq/cat maps"| FSTORE[("Feature store")]
+
+    FEOUT --> XGB["XGBoost<br/>(tabular)"]
+    FEOUT --> GNN["GAT<br/>(graph NN)"]
+    XGB --> THR["Threshold<br/>Tuning"]
+
+    XGB --> ENS["Ensemble<br/>Meta-Learner"]
+    GNN --> ENS
+    GNN -.->|"nightly rebuild"| GC["Graph Cache"]
+    GC --> API
+
+    ENS --> API["FastAPI Scoring API<br/>/predict · /predict/batch · /health"]
+
+    KPROD["Kafka Producer"] -->|transactions| KAFKA((Kafka))
+    KAFKA --> KCONS["Kafka Consumer"]
+    KCONS -->|"score via API"| API
+    KCONS -->|fraud-alerts| ALERTS(("fraud-alerts"))
+
+    API --> DASH["Streamlit Dashboard<br/>5 pages"]
+    ALERTS --> DASH
+    KAFKA --> DASH
+
+    FEOUT --> MON["Drift Detection<br/>PSI / KS"]
+    MON --> REPORT[("drift_report.json")]
+    REPORT --> ALRT["Email Alerting"]
+    REPORT --> DASH
+    ALRT -.-> SCHED["scheduler.py<br/>(daily)"]
+    GC -.-> SCHED
+    MON -.-> SCHED
 ```
 
 ## Project Structure

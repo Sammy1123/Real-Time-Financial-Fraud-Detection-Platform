@@ -37,7 +37,17 @@ DRIFT_FILE  = ROOT / "monitoring" / "drift_report.json"
 # ── Cached loaders ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_train():
-    return pd.read_parquet(PROC / "train.parquet")
+    """Prefer the full training set; fall back to the committed sample."""
+    full = PROC / "train.parquet"
+    sample = PROC / "train_sample.parquet"
+    if full.exists():
+        return pd.read_parquet(full)
+    if sample.exists():
+        st.caption("⚠️ Showing the committed 150k-row sample — full dataset not found. "
+                   "Place train.parquet in data/processed/ for complete figures.")
+        return pd.read_parquet(sample)
+    st.error("No training data found. Run feature engineering or check data/processed/.")
+    st.stop()
 
 @st.cache_data(show_spinner=False)
 def load_meta():
