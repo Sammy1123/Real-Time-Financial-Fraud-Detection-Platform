@@ -2,22 +2,27 @@
 
 ## 🔧 Model Tuning
 
-### GNN Improvements (Priority: MEDIUM)
-- Remaining: multi-hop neighbors (currently 1-hop, k=10) — torch-sparse unavailable (no C++ build tools)
-- Remaining: real-time graph serving (API uses prior-day graph / base-rate fallback)
+### GNN Improvements
+- ✅ DONE: Full-dataset training (590k nodes, 12.7M edges)
+- ✅ DONE: 2-hop neighbour sampling (bounded k=10/5 per level)
+- ✅ DONE: Nightly graph cache (api/build_graph_cache.py) feeds live GNN signal to scoring API
+- Remaining: upgrade scheduler.py one-shot runs to Windows Task Scheduler / cron in production
+- Remaining: graph cache currently scores training-graph nodes; extend to cover streaming test transactions
 
 ---
 
 ## 📡 Streaming
 
-### Producer (Priority: LOW)
-- PRODUCER_DELAY_MS=100 simulates ~10 tx/s — tune down to 0 for load testing
+### Producer
+- ✅ DONE: Schema validation before publish (validate_message; rejects to DLQ)
+- ✅ DONE: Load-test mode (`--delay-ms 0`, `--limit N`) with live throughput reporting
 
 ---
 
 ## 📈 Monitoring
 
-### Drift Detection Improvements (Priority: LOW)
-- M1/M3/M7/M8/M9 features show significant PSI drift (>0.2) — investigate root cause
-- Add scheduled runs (cron / Airflow) to run drift_detection.py daily
-- Add alerting: send email/Slack webhook when data_drift_alert or model_drift_alert is True
+### Drift Detection
+- ✅ DONE: PSI drift on M1/M3/M7/M8/M9 diagnosed — identity-table coverage skew (41% → ~19% over time), excluded from alerting with rationale
+- ✅ DONE: scheduler.py — daily pipeline (graph cache → drift → alerts)
+- ✅ DONE: alerting.py — Slack webhook + email (SMTP) on drift alerts
+- Remaining: populate ALERT_SLACK_WEBHOOK / ALERT_EMAIL_* in .env for real delivery

@@ -25,6 +25,14 @@ PSI_WARN     = 0.1   # slight drift
 PSI_ALERT    = 0.2   # significant drift
 KS_ALPHA     = 0.05  # p-value threshold for KS test
 
+# Identity-sourced columns (M1-M9): present only for transactions covered by
+# train_identity.csv (~24% of rows), and that coverage is skewed over time
+# (41% in the first time quartile vs ~19% later). Their missing-value mix
+# therefore shifts between any two time windows, producing PSI > 0.2 that
+# reflects identity-table sampling, not fraud-pattern drift. They are still
+# computed and reported, but excluded from alert decisions.
+IDENTITY_ONLY_FEATURES = {"M1", "M2", "M3", "M7", "M8", "M9"}
+
 # ── 1. Load data ───────────────────────────────────────────────────────────
 print("Loading data...")
 meta     = json.load(open(MODELS / "model_meta.json"))
@@ -67,14 +75,17 @@ for feat in FEATURES:
     psi_results[feat] = compute_psi(reference[feat].values, current[feat].values)
 
 psi_series = pd.Series(psi_results).sort_values(ascending=False)
-drifted    = psi_series[psi_series >= PSI_ALERT]
-warned     = psi_series[(psi_series >= PSI_WARN) & (psi_series < PSI_ALERT)]
+alertable  = psi_series.drop(labels=[f for f in IDENTITY_ONLY_FEATURES if f in psi_series.index])
+drifted    = alertable[alertable >= PSI_ALERT]
+warned     = alertable[(alertable >= PSI_WARN) & (alertable < PSI_ALERT)]
 
 print(f"\nPSI Results:")
 print(f"  Features with significant drift (PSI >= {PSI_ALERT}): {len(drifted)}")
 print(f"  Features with slight drift     (PSI >= {PSI_WARN}):  {len(warned)}")
 if len(drifted):
     print(f"  Top drifted: {drifted.head(5).to_dict()}")
+print(f"  NOTE: {sorted(IDENTITY_ONLY_FEATURES)} excluded from alerting —")
+print(f"  identity-table coverage skew, not real drift")
 
 # ── 3. KS test per feature ─────────────────────────────────────────────────
 print("\nRunning KS tests...")
@@ -144,6 +155,9 @@ report = {
         "psi_threshold_alert": PSI_ALERT,
         "features_drifted":    len(drifted),
         "features_warned":     len(warned),
+        "excluded_identity_only": sorted(IDENTITY_ONLY_FEATURES),
+        "identity_only_psi":   {f: round(float(psi_results[f]), 4)
+                                 for f in IDENTITY_ONLY_FEATURES if f in psi_results},
         "top_drifted_features": drifted.head(10).to_dict(),
         "all_psi": psi_series.to_dict(),
     },
