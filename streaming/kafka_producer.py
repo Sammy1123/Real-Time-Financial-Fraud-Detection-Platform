@@ -104,7 +104,7 @@ def validate_message(msg: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def main():
+def main(max_msgs: int | None = None):
     print(f"Connecting to Kafka broker at {BROKER}...")
     try:
         producer = make_producer()
@@ -114,10 +114,19 @@ def main():
         return
 
     df = load_transactions()
+    if max_msgs:
+        df = df.head(max_msgs)
+        print(f"LIMIT: publishing first {len(df):,} transactions only")
     print(f"Loaded {len(df):,} test transactions. Publishing to '{TOPIC}'...")
-    print(f"Delay between messages: {DELAY_MS * 1000:.0f}ms  (Ctrl+C to stop)\n")
+    if DELAY_MS > 0:
+        print(f"Delay between messages: {DELAY_MS * 1000:.0f}ms  "
+              f"(~{1 / DELAY_MS:.0f} tx/s)")
+    else:
+        print("LOAD TEST MODE: no delay — publishing as fast as Kafka accepts")
+    print("(Ctrl+C to stop)\n")
 
     sent = invalid = 0
+    t0 = time.time()
     try:
         for _, row in df.iterrows():
             msg = serialize(row.to_dict())
@@ -133,17 +142,33 @@ def main():
 
             if sent % 500 == 0:
                 producer.flush()
-                print(f"  Sent {sent:,} transactions ({invalid:,} rejected)...")
+                elapsed = time.time() - t0
+                print(f"  Sent {sent:,} transactions ({invalid:,} rejected) — "
+                      f"{sent / elapsed:.0f} tx/s")
 
-            time.sleep(DELAY_MS)
+            if DELAY_MS > 0:
+                time.sleep(DELAY_MS)
 
     except KeyboardInterrupt:
-        print(f"\nStopped. Sent {sent:,} transactions, rejected {invalid:,} invalid.")
+        pass
     finally:
         producer.flush()
         producer.close()
+        elapsed = time.time() - t0
+        rate = sent / elapsed if elapsed > 0 else 0
+        print(f"\nStopped. Sent {sent:,} transactions, rejected {invalid:,} invalid.")
+        print(f"Throughput: {rate:.0f} tx/s over {elapsed:.1f}s")
         print("Producer closed.")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Kafka transaction producer")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Publish only the first N transactions")
+    parser.add_argument("--delay-ms", type=int, default=None,
+                        help="Override PRODUCER_DELAY_MS from .env (0 = load test)")
+    args = parser.parse_args()
+    if args.delay_ms is not None:
+        DELAY_MS = args.delay_ms / 1000
+    main(max_msgs=args.limit)
