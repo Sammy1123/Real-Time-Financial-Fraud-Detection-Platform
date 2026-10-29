@@ -4,7 +4,7 @@ Daily scheduler for the fraud-detection platform.
 Runs as a long-lived process (or Windows Task / cron one-shot) and executes:
   1. api/build_graph_cache.py  — rebuild GNN serving cache from latest model
   2. monitoring/drift_detection.py — PSI/KS drift report
-  3. monitoring/alerting.py    — email/Slack notification if drift alerts fire
+  3. monitoring/alerting.py    — email notification if drift alerts fire
 
 Usage:
     python scheduler.py            # loop forever, daily at RUN_AT_HOUR
