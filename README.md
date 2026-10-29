@@ -1,10 +1,5 @@
 # Real-Time Financial Fraud Detection Platform
 
-https://github.com/Sammy1123/Real-Time-Financial-Fraud-Detection-Platform/assets/demo.gif
-
-*Dashboard walkthrough — replace the URL above with your recorded GIF
-(see `data/capture_demo.py` for an automated page-by-page recorder).*
-
 End-to-end fraud detection system for the IEEE-CIS Fraud Detection dataset:
 feature engineering → XGBoost + Graph Attention Network ensemble → real-time
 scoring API → Kafka streaming pipeline → monitoring dashboard.
@@ -71,6 +66,7 @@ flowchart TB
 │   └── build_graph_cache.py  Nightly GNN serving-cache builder
 ├── data/
 │   ├── eda.py              Exploratory analysis, 8 plots + summary
+│   ├── capture_demo.py     Playwright demo-frame recorder (optional)
 │   └── processed/          Train/test parquets (generated)
 ├── dashboard/app.py        Streamlit dashboard, 5 pages
 ├── features/
