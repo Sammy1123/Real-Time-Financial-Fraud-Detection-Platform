@@ -34,3 +34,6 @@ SESSION.md
 
 # Logs
 logs/
+
+# Session tooling
+watch_and_rebuild.ps1

@@ -28,6 +28,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from models.train_gnn import FraudGAT, build_graph
+from api.build_graph_cache import sample_subgraph
 
 # ── 1. Load validation data + base models ─────────────────────────────────
 print("Loading data and base models...")
@@ -68,16 +69,8 @@ rng   = np.random.default_rng(0)
 with torch.no_grad():
     for i in range(0, len(val_nodes), BATCH):
         seeds = val_nodes[i:i + BATCH]
-        nbrs  = [adj_dst[adj_off[s]:adj_off[s + 1]] for s in seeds]
-        nbrs  = np.concatenate([
-            n if len(n) <= 10 else rng.choice(n, size=10, replace=False)
-            for n in nbrs]) if nbrs else np.empty(0, dtype=np.int64)
-        n_id = np.unique(np.concatenate([seeds, nbrs])).astype(np.int64)
-        pos  = np.full(data.num_nodes, -1, dtype=np.int64)
-        pos[n_id] = np.arange(len(n_id))
-        keep = (pos[src_all] >= 0) & (pos[dst_all] >= 0)
-        edge = np.vstack([pos[src_all[keep]], pos[dst_all[keep]]])
-
+        n_id, edge = sample_subgraph(adj_dst, adj_off, data.num_nodes,
+                                     seeds, src_all, dst_all, rng)
         out = gnn(data.x[n_id], torch.as_tensor(edge, dtype=torch.long))
         p_gnn[i:i + len(seeds)] = F.softmax(out, dim=1)[:len(seeds), 1].numpy()
 

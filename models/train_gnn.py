@@ -2,11 +2,12 @@
 GNN fraud detection model using GAT (Graph Attention Network).
 Graph: nodes = ALL transactions, edges = shared card1 / addr1 / P_emaildomain.
 Node features scaled with StandardScaler to fix high-loss issue.
-Trains on the full dataset with NeighborLoader mini-batching (CPU-friendly).
+Trains on the full dataset with manual 2-hop subgraph batching (CPU-friendly).
 Saves model to models/gnn_model.pt and logs to MLflow.
 """
 import json
 import time
+import warnings as _warnings
 import numpy as np
 import pandas as pd
 import torch
@@ -14,8 +15,14 @@ import torch.nn.functional as F
 import mlflow
 from pathlib import Path
 from torch import nn
-from torch_geometric.data import Data
-from torch_geometric.nn import GATConv
+
+# torch_geometric's internals call torch.jit.script at import time, emitting
+# a FutureWarning. Under pytest -W error::FutureWarning that aborts the import
+# entirely, so suppress warnings around the import and restore state after.
+with _warnings.catch_warnings():
+    _warnings.simplefilter("ignore", FutureWarning)
+    from torch_geometric.data import Data
+    from torch_geometric.nn import GATConv
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.preprocessing import StandardScaler
@@ -47,28 +54,44 @@ def chain_edges(codes: np.ndarray, max_links: int = MAX_LINKS):
             np.concatenate([dst, src]).astype(np.int64))
 
 
-def build_graph():
+def build_graph(include_test: bool = False):
     """Build the full-dataset graph (scaled features, multi-edge).
 
-    Deterministic. Returns (data, df, scaler). df is the full train parquet
-    in graph node order (row i == node i).
+    Deterministic. Returns (data, df, scaler). df is the parquet in graph
+    node order (row i == node i).
+
+    include_test=True appends the streaming test transactions as unlabeled
+    nodes (edges formed over shared identifiers), so serving caches can
+    cover them. Scaler is always fit on the TRAIN rows only.
     """
     df       = pd.read_parquet(PROC / "train.parquet")
     FEATURES = json.load(open(FS / "features.json"))
 
-    # Scale node features (fixes high loss)
-    X_raw    = df[FEATURES].fillna(-999).values.astype(np.float32)
+    # Scale node features (fixes high loss) — fit on train only
+    X_train  = df[FEATURES].fillna(-999).values.astype(np.float32)
     scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(X_raw)
+    X_scaled = scaler.fit_transform(X_train)
+
+    if include_test:
+        test_df = pd.read_parquet(PROC / "test.parquet")
+        df = pd.concat([df, test_df], ignore_index=True)
+        X_scaled = np.vstack([
+            X_scaled,
+            scaler.transform(test_df[FEATURES].fillna(-999).values.astype(np.float32)),
+        ]).astype(np.float32)
+
+    X = torch.tensor(X_scaled, dtype=torch.float)
+    y_val = df["isFraud"].values if "isFraud" in df.columns else np.zeros(len(df))
+    y = torch.tensor(np.nan_to_num(y_val, nan=0.0), dtype=torch.long)
     X = torch.tensor(X_scaled, dtype=torch.float)
     y = torch.tensor(df["isFraud"].values, dtype=torch.long)
 
     # Multi-edge graph: card1 + addr1 + P_emaildomain
-    raw = pd.read_csv(
-        Path("data/raw") / "train_transaction.csv",
-        usecols=["TransactionID", "card1", "addr1", "P_emaildomain"]
-    )
-    df = df.merge(raw, on="TransactionID", how="left")
+    cols  = ["TransactionID", "card1", "addr1", "P_emaildomain"]
+    raw   = pd.read_csv(Path("data/raw") / "train_transaction.csv", usecols=cols)
+    raw_t = pd.read_csv(Path("data/raw") / "test_transaction.csv", usecols=cols)
+    raw   = pd.concat([raw, raw_t], ignore_index=True)
+    df    = df.merge(raw, on="TransactionID", how="left")
 
     srcs, dsts = [], []
     for col in ("card1", "addr1", "P_emaildomain"):
@@ -206,7 +229,7 @@ def main():
         mlflow.log_params({
             "model": "GAT", "hidden": 64, "heads": 4, "epochs": EPOCHS,
             "lr": 1e-3, "dropout": 0.3, "nodes": data.num_nodes,
-            "batch": BATCH, "neighbors": "10,5 (2-hop)", "loader": "manual subgraph batching",
+            "batch": BATCH, "neighbors": "10,5 (2-hop)", "sampling": "2-hop",
             "n_features": len(FEATURES), "scaled": True,
             "edge_types": "card1+addr1+P_emaildomain",
         })
@@ -253,7 +276,8 @@ def main():
             "pr_auc":       pr,
             "roc_auc":      roc,
             "features":     FEATURES,
-            "training":     "full-graph NeighborLoader",
+            "training":     "full-graph manual 2-hop subgraph batching (10,5)",
+            "sampling":     "2-hop",
             "scaler_mean":  scaler.mean_.tolist(),
             "scaler_scale": scaler.scale_.tolist(),
         }, MODELS / "gnn_model.pt")

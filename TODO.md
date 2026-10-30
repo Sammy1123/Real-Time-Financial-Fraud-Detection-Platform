@@ -8,13 +8,7 @@
 
 ---
 
-## 📡 Streaming
-
-No open items.
-
----
-
-## 📈 Monitoring
+##  Monitoring
 
 ### Drift Detection (Priority: LOW)
 - Wire scheduler.py into Windows Task Scheduler / cron for real daily runs
